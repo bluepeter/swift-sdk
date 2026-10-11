@@ -96,15 +96,18 @@
             await client.disconnect()
         }
 
-        @Test("Modern errors and authentication failures never downgrade", arguments: [400, 401, 403, 429, 500])
-        func noDowngrade(status: Int) async throws {
+        @Test("Modern errors and authentication failures never downgrade", arguments: [
+            (400, "future"), (401, "2025-11-25"), (403, "2025-11-25"),
+            (429, "2025-11-25"), (500, "2025-11-25")
+        ])
+        func noDowngrade(status: Int, supported: String) async throws {
             let ledger = HTTPRequestLedger()
             let fixture = HTTPClientFixture { _, body in
                 await ledger.append(body)
                 return try .json([
                     "jsonrpc": "2.0",
                     "id": body[httpField: "id"] ?? .null,
-                    "error": ["code": -32022, "message": "Unsupported", "data": ["supported": ["future"]]]
+                    "error": ["code": -32022, "message": "Unsupported", "data": ["supported": [.string(supported)]]]
                 ], status: status)
             }
             let client = HTTPClient(name: "tests", version: "1")
@@ -114,6 +117,24 @@
             ) }
             #expect(await ledger.requests.count == 1)
             await client.disconnect()
+        }
+
+        @Test("An oversized response chunk fails before entering the consumer queue")
+        func boundedResponseQueue() async throws {
+            let fixture = HTTPClientFixture { _, _ in
+                .init(body: Data(repeating: 32, count: 2048))
+            }
+            let stream = HTTPResponseStream(
+                request: URLRequest(url: fixture.endpoint), session: fixture.session, maximumBufferedBytes: 1024
+            )
+            stream.task.resume()
+            defer { stream.task.cancel() }
+            var iterator = stream.events.makeAsyncIterator()
+            guard case .response = try await iterator.next() else {
+                Issue.record("Missing response headers")
+                return
+            }
+            await #expect(throws: HTTPClientError.self) { try await iterator.next() }
         }
 
         @Test("SSE progress and final content are processed within the originating request")

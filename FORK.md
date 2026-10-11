@@ -20,7 +20,8 @@ https://github.com/bluepeter/swift-sdk.
 - Only form elicitation is advertised. URL elicitation, sampling, roots, Tasks,
   and full modern server support are outside this extension. Reusing the
   existing form value types does not enable older elicitation callbacks.
-- Responses and individual SSE frames are bounded at 16 MiB. Input rounds are
+- Responses, individual SSE frames, and queued response bytes are bounded at
+  16 MiB each. Input rounds are
   bounded at 16 by default. Callers own request deadlines and input UI policy.
 - Supplied `inputSchema` overrides the last observed tool definition, allowing
   callers with atomic discovery caches to mirror headers from their own snapshot.
@@ -38,7 +39,8 @@ legacy client implement 2026. Do not apply build-time patches to package checkou
 Run `swift build --disable-sandbox` and `swift test --disable-sandbox` on macOS.
 The original HTTP transport suite retains its 52 tests, split into focused files;
 its URLProtocol task closure is explicitly Sendable for the current Swift compiler.
-New tests cover form/state round trips, fallback, auth failures, progress,
+New tests cover form/state round trips, fallback, auth failures (including errors
+advertising an older supported protocol), bounded response buffering, progress,
 concurrency, cancellation, retry limits, and header handling. Cumbersome's
 `Tests/MCPBaseline` also exercises old Everything and a 2026 loopback wire fixture.
 These checks do not establish universal conformance or third-party compatibility.

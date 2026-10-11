@@ -11,21 +11,34 @@
 
         let task: URLSessionDataTask
         let events: AsyncThrowingStream<Event, Error>
+        let consumed: @Sendable (Int) -> Void
 
-        init(request: URLRequest, session: URLSession) {
+        init(request: URLRequest, session: URLSession, maximumBufferedBytes: Int) {
             let (events, continuation) = AsyncThrowingStream<Event, Error>.makeStream()
-            let delegate = Delegate(continuation: continuation)
+            let delegate = Delegate(continuation: continuation, maximumBufferedBytes: maximumBufferedBytes)
             let task = session.dataTask(with: request)
             task.delegate = delegate
             continuation.onTermination = { @Sendable _ in task.cancel() }
             self.task = task
             self.events = events
+            consumed = { delegate.consumed($0) }
         }
 
-        private final class Delegate: NSObject, URLSessionDataDelegate, Sendable {
+        private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             let continuation: AsyncThrowingStream<Event, Error>.Continuation
-            init(continuation: AsyncThrowingStream<Event, Error>.Continuation) {
+            let maximumBufferedBytes: Int
+            // URLSession produces chunks independently of the async consumer. Bound that queue
+            // as well as individual parsed messages; all byte accounting is protected by this lock.
+            private let lock = NSLock()
+            private var bufferedBytes = 0
+
+            init(continuation: AsyncThrowingStream<Event, Error>.Continuation, maximumBufferedBytes: Int) {
                 self.continuation = continuation
+                self.maximumBufferedBytes = maximumBufferedBytes
+            }
+
+            func consumed(_ count: Int) {
+                lock.withLock { bufferedBytes -= count }
             }
 
             func urlSession(
@@ -43,7 +56,17 @@
                 completionHandler(.allow)
             }
 
-            func urlSession(_: URLSession, dataTask _: URLSessionDataTask, didReceive data: Data) {
+            func urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+                let fits = lock.withLock {
+                    guard data.count <= maximumBufferedBytes - bufferedBytes else { return false }
+                    bufferedBytes += data.count
+                    return true
+                }
+                guard fits else {
+                    continuation.finish(throwing: HTTPClientError.messageTooLarge)
+                    dataTask.cancel()
+                    return
+                }
                 continuation.yield(.data(data))
             }
 
@@ -100,7 +123,9 @@
             request.setValue(nil, forHTTPHeaderField: "Mcp-Session-Id")
             request.setValue(nil, forHTTPHeaderField: "Last-Event-ID")
             try HTTPRoutingHeaders.apply(method: method, parameters: parameters, schema: schema, to: &request)
-            let stream = HTTPResponseStream(request: request, session: session)
+            let stream = HTTPResponseStream(
+                request: request, session: session, maximumBufferedBytes: maximumMessageBytes
+            )
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
                 stream.task.resume()
@@ -109,7 +134,9 @@
                 guard case let .response(response) = try await iterator.next() else {
                     throw HTTPClientError.invalidResponse
                 }
-                let bytes = HTTPResponseBytes(iterator: iterator, maximumFrameBytes: maximumMessageBytes)
+                let bytes = HTTPResponseBytes(
+                    iterator: iterator, maximumFrameBytes: maximumMessageBytes, consumed: stream.consumed
+                )
                 if response.statusCode == 200, response.mimeType?.lowercased() == "text/event-stream" {
                     for try await event in bytes.events {
                         if let result: Output = try await decode(
@@ -168,7 +195,8 @@
                 return nil
             }
             guard try message[httpField: "id"] == (HTTPProtocol.value(id)),
-                  let result = message[httpField: "result"] else {
+                  let result = message[httpField: "result"]
+            else {
                 throw HTTPClientError.invalidResponse
             }
             return try JSONDecoder().decode(Output.self, from: JSONEncoder().encode(result))
@@ -180,13 +208,15 @@
         typealias Element = UInt8
         var iterator: AsyncThrowingStream<HTTPResponseStream.Event, Error>.Iterator
         let maximumFrameBytes: Int
+        let consumed: @Sendable (Int) -> Void
         func makeAsyncIterator() -> Iterator {
-            Iterator(source: iterator, maximumFrameBytes: maximumFrameBytes)
+            Iterator(source: iterator, maximumFrameBytes: maximumFrameBytes, consumed: consumed)
         }
 
         struct Iterator: AsyncIteratorProtocol {
             var source: AsyncThrowingStream<HTTPResponseStream.Event, Error>.Iterator
             let maximumFrameBytes: Int
+            let consumed: @Sendable (Int) -> Void
             var chunk = Data().makeIterator()
             var frameBytes = 0
             var lineHasContent = false
@@ -198,6 +228,7 @@
                 while byte == nil {
                     guard let event = try await source.next() else { return nil }
                     guard case let .data(data) = event else { throw HTTPClientError.invalidResponse }
+                    consumed(data.count)
                     chunk = data.makeIterator()
                     byte = chunk.next()
                 }

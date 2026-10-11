@@ -275,6 +275,7 @@
             guard case let HTTPClientError.response(status, code, _, data) = error else { return false }
             // Authentication, rate limits, outages, and recognized modern errors are never
             // downgraded. Only the side-effect-free discovery probe may select the legacy path.
+            guard status == 400 || status == 404 || (200 ..< 300).contains(status) else { return false }
             if code == -32022 {
                 let supported = data?[httpField: "supported"]?.arrayValue?.compactMap(\.stringValue) ?? []
                 return !Set(supported).intersection(Version.supported).isEmpty
@@ -336,7 +337,8 @@
 
         func accept(_ message: Value) throws -> Bool {
             guard try message[httpField: "params"]?[httpField: "_meta"]?[httpField: HTTPProtocol.subscriptionKey] ==
-                (HTTPProtocol.value(id)) else {
+                (HTTPProtocol.value(id))
+            else {
                 throw HTTPClientError.invalidResponse
             }
             if message[httpField: "method"] == "notifications/subscriptions/acknowledged" {
