@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
 
 /// The 2026 HTTP binding's standard headers and schema-declared primitive mirrors.
 enum HTTPRoutingHeaders {
