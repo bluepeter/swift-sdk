@@ -6,6 +6,9 @@ public enum HTTPClientError: Error, Sendable {
     case invalidResponse
     case unsupportedVersion
     case unsupportedInput
+    case unsupportedInputMethod
+    case unsupportedURLInput
+    case inputUnavailable
     case inputRoundLimit
     case invalidHeaderAnnotation
     case messageTooLarge
@@ -45,15 +48,19 @@ struct HTTPInputRequired: Decodable, Sendable {
         }
 
         func form() throws -> CreateElicitation.Parameters.FormParameters {
-            guard method == CreateElicitation.name,
-                  params[httpField: "mode"] == nil || params[httpField: "mode"] == .string("form") else {
+            guard method == CreateElicitation.name else { throw HTTPClientError.unsupportedInputMethod }
+            if params[httpField: "mode"] == .string("url") {
+                throw HTTPClientError.unsupportedURLInput
+            }
+            guard params[httpField: "mode"] == nil || params[httpField: "mode"] == .string("form") else {
                 throw HTTPClientError.unsupportedInput
             }
             guard let message = params[httpField: "message"]?.stringValue,
                   let schema = params[httpField: "requestedSchema"]?.objectValue,
                   schema["type"] == "object",
                   Set(schema.keys).isSubset(of: ["type", "properties", "required", "title", "description"]),
-                  let properties = schema["properties"]?.objectValue else {
+                  let properties = schema["properties"]?.objectValue
+            else {
                 throw HTTPClientError.unsupportedInput
             }
             let required = schema["required"]?.arrayValue?.compactMap(\.stringValue)

@@ -19,7 +19,12 @@ https://github.com/bluepeter/swift-sdk.
   restores the subscription.
 - Only form elicitation is advertised. URL elicitation, sampling, roots, Tasks,
   and full modern server support are outside this extension. Reusing the
-  existing form value types does not enable older elicitation callbacks.
+  existing form value types does not enable older elicitation callbacks. Those
+  callbacks receive a method-not-found error explaining the supported input/retry
+  flow, without advertising callback support. The public
+  `HTTPClient.formElicitationProtocolVersion` lets hosts describe that requirement.
+- Unsupported URL input, other input methods, missing form context, validation
+  limits, and transport errors remain distinct typed failures for host UI.
 - Responses, individual SSE frames, and queued response bytes are bounded at
   16 MiB each. Input rounds are
   bounded at 16 by default. Callers own request deadlines and input UI policy.

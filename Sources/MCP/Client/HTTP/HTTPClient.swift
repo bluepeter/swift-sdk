@@ -5,6 +5,8 @@
     /// HTTP client supporting 2026 discovery/MRTR and the existing SDK's legacy tool path.
     /// The legacy Client and HTTPClientTransport retain their behavior and public APIs.
     public actor HTTPClient {
+        /// The protocol revision implemented by this client's form input/retry flow.
+        public static let formElicitationProtocolVersion = HTTPProtocol.version
         private let logger = Logger(label: "mcp.http-client")
         private let info: Client.Info
         private let supportsForms: Bool
@@ -108,6 +110,14 @@
 
         private func connectLegacy(transport: any Transport, attempt: UUID) async throws -> HTTPConnectionInfo {
             let client = Client(name: info.name, version: info.version)
+            // Explain a known unsupported flow without advertising it or waiting for input.
+            await client.withMethodHandler(CreateElicitation.self) { _ in
+                throw MCPError.methodNotFound(
+                    "Elicitation callbacks are not supported on this connection. "
+                        + "Form elicitation requires MCP \(HTTPProtocol.version) input_required responses "
+                        + "and inputResponses on the retried request. URL elicitation is not supported."
+                )
+            }
             legacy = client
             for register in registrations {
                 await register(client)
@@ -187,9 +197,10 @@
                         else { throw HTTPClientError.invalidResponse }
                         var responses: [String: Value] = [:]
                         for key in (input.inputRequests ?? [:]).keys.sorted() {
-                            guard let request = input.inputRequests?[key],
-                                  let formHandler else { throw HTTPClientError.unsupportedInput }
-                            let response = try await formHandler(request.form())
+                            guard let request = input.inputRequests?[key] else { throw HTTPClientError.invalidResponse }
+                            let form = try request.form()
+                            guard let formHandler else { throw HTTPClientError.inputUnavailable }
+                            let response = try await formHandler(form)
                             try Task.checkCancellation()
                             responses[key] = try HTTPProtocol.value(response)
                         }
