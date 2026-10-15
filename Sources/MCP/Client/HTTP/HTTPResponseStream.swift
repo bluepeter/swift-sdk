@@ -24,6 +24,7 @@
             consumed = { delegate.consumed($0) }
         }
 
+        // Leave redirect handling to URLSession, matching the legacy HTTP transport.
         private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             let continuation: AsyncThrowingStream<Event, Error>.Continuation
             let maximumBufferedBytes: Int
@@ -72,17 +73,6 @@
 
             func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
                 continuation.finish(throwing: error)
-            }
-
-            /// Do not forward custom credentials or replay a tool POST to a redirected endpoint.
-            func urlSession(
-                _: URLSession,
-                task _: URLSessionTask,
-                willPerformHTTPRedirection _: HTTPURLResponse,
-                newRequest _: URLRequest,
-                completionHandler: @escaping @Sendable (URLRequest?) -> Void
-            ) {
-                completionHandler(nil)
             }
         }
     }

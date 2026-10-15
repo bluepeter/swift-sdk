@@ -9,6 +9,8 @@ https://github.com/bluepeter/swift-sdk.
 `HTTPClient` adds the 2026-07-28 HTTP client path needed by Cumbersome:
 
 - Discovery, per-request metadata, routing headers, JSON and SSE responses.
+- Redirects use URLSession's normal handling, matching the legacy transport.
+  App Transport Security remains configured by the host app.
 - A discovery probe can select the existing legacy initialization path.
   Authentication failures and recognized modern protocol errors do not silently
   downgrade. Existing servers still receive an extra discovery probe.
@@ -54,7 +56,9 @@ The original HTTP transport suite retains its 52 tests, split into focused files
 its URLProtocol task closure is explicitly Sendable for the current Swift compiler.
 New tests cover form/state round trips, fallback, auth failures (including errors
 advertising an older supported protocol), bounded response buffering, progress,
-concurrency, cancellation, retry limits, and header handling. Subscription tests
+concurrency, cancellation, retry limits, and header handling. Loopback HTTP tests
+cover 307 and 308 redirects through discovery and tool calls, preserving POST
+bodies and matching URLSession's credential handling. Subscription tests
 cover graceful and abrupt closure, bounded retry and rearming, stable stream
 budget renewal, permanent refusal, initial listen failure, and cancellation
 during backoff. Cumbersome's `Tests/MCPBaseline` also exercises old Everything,

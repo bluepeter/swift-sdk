@@ -50,6 +50,9 @@ let package = Package(
             name: "MCPTests",
             dependencies: [
                 "MCP",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(
