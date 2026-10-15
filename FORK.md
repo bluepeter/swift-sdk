@@ -14,9 +14,16 @@ https://github.com/bluepeter/swift-sdk.
   downgrade. Existing servers still receive an extra discovery probe.
 - Tool calls own their form handler, opaque continuation state, retries, and
   cancellation. Retries use fresh IDs. Answers are never synthesized.
-- Tool change subscriptions wait for acknowledgment. Stream closure does not
-  replay writes or trigger an unlimited reconnect loop; explicit reconnect
-  restores the subscription.
+- Tool change subscriptions wait for acknowledgment. A dropped or completed
+  stream gets at most three automatic replacements, with 1, 2, and 4 second
+  delays. A stream acknowledged for at least 30 seconds resets that budget.
+  Refused filters and permanent protocol/authentication errors stop recovery.
+  Explicit disconnect is terminal, and tool calls are never replayed.
+- Hosts use `onToolSubscriptionRestored` to refresh tools after a replacement
+  stream is acknowledged, because notifications lost during an outage cannot
+  be replayed. `recoverToolSubscription` rearms an exhausted cycle on foreground
+  or tool use, coalescing with any active listen or retry. It does not reconnect
+  a deliberately disconnected client or change the legacy transport.
 - Only form elicitation is advertised. URL elicitation, sampling, roots, Tasks,
   and full modern server support are outside this extension. Reusing the
   existing form value types does not enable older elicitation callbacks. Those
@@ -33,7 +40,8 @@ https://github.com/bluepeter/swift-sdk.
 
 Sources: [2026 HTTP transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http),
 [MRTR](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr),
-and [elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation).
+[elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation),
+and [subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions).
 
 ## Maintenance and checks
 
@@ -46,6 +54,10 @@ The original HTTP transport suite retains its 52 tests, split into focused files
 its URLProtocol task closure is explicitly Sendable for the current Swift compiler.
 New tests cover form/state round trips, fallback, auth failures (including errors
 advertising an older supported protocol), bounded response buffering, progress,
-concurrency, cancellation, retry limits, and header handling. Cumbersome's
-`Tests/MCPBaseline` also exercises old Everything and a 2026 loopback wire fixture.
+concurrency, cancellation, retry limits, and header handling. Subscription tests
+cover graceful and abrupt closure, bounded retry and rearming, stable stream
+budget renewal, permanent refusal, initial listen failure, and cancellation
+during backoff. Cumbersome's `Tests/MCPBaseline` also exercises old Everything,
+a 2026 loopback wire fixture, and upstream 2026 Everything with actual socket
+drops and process restarts through the app's cached chat executor.
 These checks do not establish universal conformance or third-party compatibility.

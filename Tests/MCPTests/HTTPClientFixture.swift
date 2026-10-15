@@ -7,6 +7,7 @@
             var status = 200
             var headers = ["Content-Type": "application/json"]
             let body: Data
+            var additionalBody: AsyncThrowingStream<Data, Error>?
             static func json(_ value: Value, status: Int = 200) throws -> Self {
                 try Self(status: status, body: JSONEncoder().encode(value))
             }
@@ -82,6 +83,13 @@
                         )!
                         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                         client?.urlProtocol(self, didLoad: reply.body)
+                        if let additionalBody = reply.additionalBody {
+                            for try await chunk in additionalBody {
+                                try Task.checkCancellation()
+                                client?.urlProtocol(self, didLoad: chunk)
+                            }
+                        }
+                        try Task.checkCancellation()
                         client?.urlProtocolDidFinishLoading(self)
                     } catch { client?.urlProtocol(self, didFailWithError: error) }
                 }

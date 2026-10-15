@@ -1,13 +1,11 @@
 #if canImport(EventSource)
     import Foundation
-    import Logging
 
     /// HTTP client supporting 2026 discovery/MRTR and the existing SDK's legacy tool path.
     /// The legacy Client and HTTPClientTransport retain their behavior and public APIs.
     public actor HTTPClient {
         /// The protocol revision implemented by this client's form input/retry flow.
         public static let formElicitationProtocolVersion = HTTPProtocol.version
-        private let logger = Logger(label: "mcp.http-client")
         private let info: Client.Info
         private let supportsForms: Bool
         private let maximumInputRounds: Int
@@ -19,7 +17,8 @@
         private var handlers: [String: [@Sendable (Value) async throws -> Void]] = [:]
         private var registrations: [@Sendable (Client) async -> Void] = []
         private var toolSchemas: [String: Value] = [:]
-        private var subscription: Task<Void, Never>?
+        private var subscription: HTTPToolSubscription?
+        private var subscriptionRestoredHandlers: [@Sendable () async -> Void] = []
 
         /// A finite round limit also bounds state-only retries that never ask the user anything.
         public init(name: String, version: String, supportsForms: Bool = false, maximumInputRounds: Int = 16) {
@@ -41,6 +40,20 @@
                 await legacy.onNotification(type, handler: handler)
             }
             return self
+        }
+
+        /// Called after a replacement tool notification stream is acknowledged.
+        /// Refresh cached tools here: changes during the outage cannot be replayed.
+        @discardableResult
+        public func onToolSubscriptionRestored(_ handler: @escaping @Sendable () async -> Void) -> Self {
+            subscriptionRestoredHandlers.append(handler)
+            return self
+        }
+
+        /// Rearm an exhausted recovery cycle on foreground or explicit tool use.
+        /// Coalesces with an active stream/retry and never sends tool requests.
+        public func recoverToolSubscription() async {
+            await subscription?.resume()
         }
 
         public func connect(
@@ -221,7 +234,7 @@
 
         public func disconnect() async {
             generation = UUID()
-            subscription?.cancel()
+            let previousSubscription = subscription
             subscription = nil
             let pending = operations.values
             operations.removeAll()
@@ -234,6 +247,7 @@
             toolSchemas.removeAll()
             let old = legacy
             legacy = nil
+            await previousSubscription?.stop()
             await old?.disconnect()
         }
 
@@ -300,67 +314,25 @@
 
         private func startToolSubscription(_ connection: ModernHTTPConnection) async -> Bool {
             guard handlers[ToolListChangedNotification.name] != nil else { return false }
-            let id = ID.random
-            let state = HTTPToolSubscription(id: id)
-            let (ready, signal) = AsyncStream<Void>.makeStream()
-            let task = Task { [supportsForms] in
-                defer { signal.finish() }
-                do {
-                    let _: Value = try await connection.request(
-                        method: "subscriptions/listen", id: id,
-                        parameters: ["notifications": ["toolsListChanged": true]],
-                        formSupport: supportsForms,
-                        notification: { message in
-                            if try await state.accept(message) {
-                                try await self.receive(message)
-                            }
-                            if message[httpField: "method"] == "notifications/subscriptions/acknowledged" {
-                                signal.yield(())
-                                signal.finish()
-                            }
-                        }
-                    )
-                } catch {
-                    // A closed subscription does not invalidate ordinary tools or replay calls.
-                    // The owner may reconnect explicitly; there is no unbounded reconnect loop.
-                    if !Task.isCancelled {
-                        logger.warning("MCP tool list subscription ended")
-                    }
-                }
-            }
-            subscription = task
-            return await withTaskCancellationHandler {
-                for await _ in ready {
-                    break
-                }
-                return await state.toolsEnabled
-            } onCancel: { task.cancel() }
-        }
-    }
-
-    private actor HTTPToolSubscription {
-        let id: ID
-        var acknowledged = false
-        var toolsEnabled = false
-        init(id: ID) {
-            self.id = id
+            let attempt = generation
+            let subscription = HTTPToolSubscription(
+                connection: connection, supportsForms: supportsForms,
+                notification: { [weak self] message in
+                    guard let self else { return }
+                    try await check(attempt)
+                    try await receive(message)
+                },
+                restored: { [weak self] in await self?.toolSubscriptionRestored(attempt) }
+            )
+            self.subscription = subscription
+            return await subscription.start()
         }
 
-        func accept(_ message: Value) throws -> Bool {
-            guard try message[httpField: "params"]?[httpField: "_meta"]?[httpField: HTTPProtocol.subscriptionKey] ==
-                (HTTPProtocol.value(id))
-            else {
-                throw HTTPClientError.invalidResponse
+        private func toolSubscriptionRestored(_ attempt: UUID) async {
+            for handler in subscriptionRestoredHandlers {
+                guard attempt == generation, !Task.isCancelled else { return }
+                await handler()
             }
-            if message[httpField: "method"] == "notifications/subscriptions/acknowledged" {
-                guard !acknowledged else { throw HTTPClientError.invalidResponse }
-                acknowledged = true
-                toolsEnabled =
-                    message[httpField: "params"]?[httpField: "notifications"]?[httpField: "toolsListChanged"] == true
-                return false
-            }
-            guard acknowledged else { throw HTTPClientError.invalidResponse }
-            return toolsEnabled && message[httpField: "method"] == .string(ToolListChangedNotification.name)
         }
     }
 #endif
