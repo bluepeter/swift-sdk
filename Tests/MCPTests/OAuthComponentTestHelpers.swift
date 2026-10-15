@@ -59,7 +59,7 @@
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
-            Task {
+            Task { @Sendable [self] in
                 do {
                     let (response, data) = try await self.executeHandler(for: request)
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
