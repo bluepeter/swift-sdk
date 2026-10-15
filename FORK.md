@@ -12,6 +12,9 @@ https://github.com/bluepeter/swift-sdk.
 - Redirects use URLSession's normal handling, matching the legacy transport.
   App Transport Security remains configured by the host app.
 - A discovery probe can select the existing legacy initialization path.
+  HTTP error responses retain their status even when rejected before JSON-RPC
+  dispatch with a generic ID. Successful HTTP responses retain the existing
+  JSON-RPC ID checks.
   Authentication failures and recognized modern protocol errors do not silently
   downgrade. Existing servers still receive an extra discovery probe.
 - Tool calls own their form handler, opaque continuation state, retries, and
@@ -54,9 +57,12 @@ legacy client implement 2026. Do not apply build-time patches to package checkou
 Run `swift build --disable-sandbox` and `swift test --disable-sandbox` on macOS.
 The original HTTP transport suite retains its 52 tests, split into focused files;
 its URLProtocol task closure is explicitly Sendable for the current Swift compiler.
-New tests cover form/state round trips, fallback, auth failures (including errors
-advertising an older supported protocol), bounded response buffering, progress,
-concurrency, cancellation, retry limits, and header handling. Loopback HTTP tests
+New tests cover form/state round trips, fallback after a captured Kagi/FastMCP
+HTTP rejection, negotiated headers on stateless legacy SSE connections, auth
+failures (including generic error IDs and advertised older protocols), tool
+errors without fallback or replay, response ID correlation, bounded response
+buffering, progress, concurrency, cancellation,
+retry limits, and header handling. Loopback HTTP tests
 cover 307 and 308 redirects through discovery and tool calls, preserving POST
 bodies and matching URLSession's credential handling. Subscription tests
 cover graceful and abrupt closure, bounded retry and rearming, stable stream
@@ -65,3 +71,11 @@ during backoff. Cumbersome's `Tests/MCPBaseline` also exercises old Everything,
 a 2026 loopback wire fixture, and upstream 2026 Everything with actual socket
 drops and process restarts through the app's cached chat executor.
 These checks do not establish universal conformance or third-party compatibility.
+
+On 2026-10-15, Cumbersome's `MCPClientService` connected to the authenticated
+Kagi endpoint using this working SDK, negotiated 2025-11-25, discovered
+`kagi_search_fetch` and `kagi_extract`, and refreshed the tool list. A subsequent
+live check through the same app client executed one search and two extractions:
+search returned the official Swift documentation, and extraction returned the
+requested public example page content. The app's legacy/modern fixture baseline
+and official 2026 Everything checks also passed.
