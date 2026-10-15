@@ -165,7 +165,10 @@
         ) async throws -> Output? {
             let message = try? JSONDecoder().decode(HTTPJSONValue.self, from: data).value
             if let error = message?[httpField: "error"] {
-                if let responseID = message?[httpField: "id"], responseID != .null,
+                // HTTP failures can originate before JSON-RPC dispatch and carry a generic ID.
+                // Preserve their status for discovery fallback and authentication error handling.
+                if (200 ..< 300).contains(status),
+                   let responseID = message?[httpField: "id"], responseID != .null,
                    try responseID != (HTTPProtocol.value(id)) {
                     throw HTTPClientError.invalidResponse
                 }

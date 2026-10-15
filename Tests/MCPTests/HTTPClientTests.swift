@@ -99,22 +99,26 @@
         @Test("Modern errors and authentication failures never downgrade", arguments: [
             (400, "future"), (401, "2025-11-25"), (403, "2025-11-25"),
             (429, "2025-11-25"), (500, "2025-11-25")
-        ])
-        func noDowngrade(status: Int, supported: String) async throws {
+        ], [false, true])
+        func noDowngrade(response: (Int, String), genericID: Bool) async throws {
+            let (status, supported) = response
             let ledger = HTTPRequestLedger()
             let fixture = HTTPClientFixture { _, body in
                 await ledger.append(body)
                 return try .json([
                     "jsonrpc": "2.0",
-                    "id": body[httpField: "id"] ?? .null,
+                    "id": genericID ? "server-error" : body[httpField: "id"] ?? .null,
                     "error": ["code": -32022, "message": "Unsupported", "data": ["supported": [.string(supported)]]]
                 ], status: status)
             }
             let client = HTTPClient(name: "tests", version: "1")
-            await #expect(throws: HTTPClientError.self) { try await client.connect(
-                endpoint: fixture.endpoint,
-                session: fixture.session
-            ) }
+            do {
+                _ = try await client.connect(endpoint: fixture.endpoint, session: fixture.session)
+                Issue.record("Expected discovery failure")
+            } catch let HTTPClientError.response(actualStatus, code, _, _) {
+                #expect(actualStatus == status)
+                #expect(code == -32022)
+            }
             #expect(await ledger.requests.count == 1)
             await client.disconnect()
         }
