@@ -22,7 +22,7 @@ enum HTTPRoutingHeaders {
             request.setValue(nil, forHTTPHeaderField: key)
         }
         request.setValue(method, forHTTPHeaderField: "Mcp-Method")
-        let name = parameters["name"] ?? parameters["uri"]
+        let name = parameters["name"] ?? parameters["uri"] ?? parameters["taskId"]
         if let name, case let .string(text) = name {
             request.setValue(encode(text), forHTTPHeaderField: "Mcp-Name")
         }

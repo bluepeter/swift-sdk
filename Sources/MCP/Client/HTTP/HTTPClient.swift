@@ -12,6 +12,7 @@
         private var legacy: Client?
         private var ownedSession: URLSession?
         private var modern: ModernHTTPConnection?
+        private var supportsTasks = false
         private var generation = UUID()
         private var operations: [ID: @Sendable () -> Void] = [:]
         private var handlers: [String: [@Sendable (Value) async throws -> Void]] = [:]
@@ -85,13 +86,15 @@
                 try check(attempt)
                 guard result.supportedVersions.contains(HTTPProtocol.version)
                 else { throw HTTPClientError.unsupportedVersion }
+                supportsTasks = result.supportsTasks
                 let receivesChanges = result.capabilities.tools != nil ? await startToolSubscription(connection) : false
                 try check(attempt)
                 return HTTPConnectionInfo(
                     protocolVersion: HTTPProtocol.version,
                     capabilities: result.capabilities,
                     instructions: result.instructions,
-                    subscribedToToolChanges: receivesChanges
+                    subscribedToToolChanges: receivesChanges,
+                    supportsTasks: result.supportsTasks
                 )
             } catch {
                 try check(attempt)
@@ -183,7 +186,7 @@
         /// One cancellable operation owns every round and every form wait.
         public func callTool(
             name: String, arguments: [String: Value]? = nil, meta: Metadata? = nil, inputSchema: Value? = nil,
-            formHandler: HTTPFormHandler? = nil
+            formHandler: HTTPFormHandler? = nil, taskHandler: HTTPTaskHandler? = nil
         ) async throws -> RequestContext<CallTool.Result> {
             if let legacy {
                 return try await legacy.callTool(name: name, arguments: arguments, meta: meta)
@@ -191,6 +194,7 @@
             guard let modern else { throw MCPError.internalError("Client is not connected") }
             let schema = inputSchema ?? toolSchemas[name]
             let rounds = maximumInputRounds
+            let taskSupport = supportsTasks && taskHandler != nil
             return start(id: .random) {
                 var parameters = try HTTPProtocol.parameters(CallTool.Parameters(
                     name: name,
@@ -201,28 +205,56 @@
                     try Task.checkCancellation()
                     let result: HTTPToolResult = try await modern.request(
                         method: CallTool.name, id: .random, parameters: parameters, schema: schema,
-                        formSupport: formHandler != nil, notification: { try await self.receive($0) }
+                        formSupport: formHandler != nil, taskSupport: taskSupport, notification: { try await self.receive($0) }
                     )
                     switch result {
                     case let .complete(result): return result
+                    case let .task(task):
+                        guard taskSupport, let taskHandler else { throw HTTPClientError.invalidResponse }
+                        return try await taskHandler(task)
                     case let .inputRequired(input):
                         guard input.inputRequests != nil || input.requestState != nil
                         else { throw HTTPClientError.invalidResponse }
-                        var responses: [String: Value] = [:]
-                        for key in (input.inputRequests ?? [:]).keys.sorted() {
-                            guard let request = input.inputRequests?[key] else { throw HTTPClientError.invalidResponse }
-                            let form = try request.form()
-                            guard let formHandler else { throw HTTPClientError.inputUnavailable }
-                            let response = try await formHandler(form)
-                            try Task.checkCancellation()
-                            responses[key] = try HTTPProtocol.value(response)
-                        }
+                        let responses = try await input.responses(using: formHandler)
                         parameters["inputResponses"] = input.inputRequests == nil ? nil : .object(responses)
                         parameters["requestState"] = input.requestState.map(Value.string)
                     }
                 }
                 throw HTTPClientError.inputRoundLimit
             }
+        }
+
+        /// Task lifecycle calls never replay the tool that created the task.
+        public func getTask(_ taskID: String) async throws -> HTTPTaskState {
+            try await taskRequest("tasks/get", parameters: ["taskId": .string(taskID)])
+        }
+
+        public func updateTask(_ taskID: String, responses: [String: Value]) async throws {
+            let _: Empty = try await taskRequest("tasks/update", parameters: [
+                "taskId": .string(taskID), "inputResponses": .object(responses)
+            ])
+        }
+
+        /// Acknowledges intent only. Query the task to determine its final status.
+        public func cancelTask(_ taskID: String) async throws {
+            let _: Empty = try await taskRequest("tasks/cancel", parameters: ["taskId": .string(taskID)])
+        }
+
+        private func taskRequest<Output: Decodable & Sendable>(
+            _ method: String, parameters: [String: Value]
+        ) async throws -> Output {
+            guard let modern, supportsTasks else { throw HTTPClientError.unsupportedVersion }
+            let attempt = generation
+            let context: RequestContext<Output> = start(id: .random) {
+                let result: Output = try await modern.request(
+                    method: method, id: .random, parameters: parameters,
+                    formSupport: self.supportsForms, taskSupport: true,
+                    notification: { try await self.receive($0) }
+                )
+                try await self.check(attempt)
+                return result
+            }
+            return try await awaitCancellable(context)
         }
 
         public func cancelRequest(_ id: ID, reason: String? = nil) async throws {
@@ -242,6 +274,7 @@
                 cancel()
             }
             modern = nil
+            supportsTasks = false
             ownedSession?.invalidateAndCancel()
             ownedSession = nil
             toolSchemas.removeAll()

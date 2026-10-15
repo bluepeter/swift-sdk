@@ -20,6 +20,7 @@ public struct HTTPConnectionInfo: Sendable {
     public let capabilities: Server.Capabilities
     public let instructions: String?
     var subscribedToToolChanges: Bool = false
+    public internal(set) var supportsTasks = false
     public var supportsToolListChanges: Bool {
         protocolVersion == HTTPProtocol.version ? subscribedToToolChanges : capabilities.tools?.listChanged == true
     }
@@ -33,6 +34,17 @@ struct HTTPDiscovery: Decodable, Sendable {
     let supportedVersions: [String]
     let capabilities: Server.Capabilities
     let instructions: String?
+    let supportsTasks: Bool
+
+    enum CodingKeys: String, CodingKey { case supportedVersions, capabilities, instructions }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        supportedVersions = try container.decode([String].self, forKey: .supportedVersions)
+        capabilities = try container.decode(Server.Capabilities.self, forKey: .capabilities)
+        instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
+        let raw = try container.decode(HTTPJSONValue.self, forKey: .capabilities).value
+        supportsTasks = raw[httpField: "extensions"]?[httpField: HTTPTask.extensionIdentifier]?.objectValue != nil
+    }
 }
 
 struct HTTPInputRequired: Decodable, Sendable {
@@ -58,9 +70,12 @@ struct HTTPInputRequired: Decodable, Sendable {
             guard let message = params[httpField: "message"]?.stringValue,
                   let schema = params[httpField: "requestedSchema"]?.objectValue,
                   schema["type"] == "object",
-                  Set(schema.keys).isSubset(of: ["type", "properties", "required", "title", "description"]),
+                  Set(schema.keys).isSubset(of: ["type", "properties", "required", "title", "description", "$schema"]),
                   let properties = schema["properties"]?.objectValue
             else {
+                throw HTTPClientError.unsupportedInput
+            }
+            if let dialect = schema["$schema"], dialect != .string("https://json-schema.org/draft/2020-12/schema") {
                 throw HTTPClientError.unsupportedInput
             }
             let required = schema["required"]?.arrayValue?.compactMap(\.stringValue)
@@ -76,12 +91,25 @@ struct HTTPInputRequired: Decodable, Sendable {
 
     let inputRequests: [String: Input]?
     let requestState: String?
+
+    func responses(using handler: HTTPFormHandler?) async throws -> [String: Value] {
+        var responses: [String: Value] = [:]
+        for (key, request) in (inputRequests ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let form = try request.form()
+            guard let handler else { throw HTTPClientError.inputUnavailable }
+            let response = try await handler(form)
+            try Task.checkCancellation()
+            responses[key] = try HTTPProtocol.value(response)
+        }
+        return responses
+    }
 }
 
 /// Discriminate before decoding content: input_required has no final tool content.
 enum HTTPToolResult: Decodable, Sendable {
     case complete(CallTool.Result)
     case inputRequired(HTTPInputRequired)
+    case task(HTTPTask)
 
     enum CodingKeys: String, CodingKey { case resultType }
     init(from decoder: Decoder) throws {
@@ -89,6 +117,7 @@ enum HTTPToolResult: Decodable, Sendable {
             .decodeIfPresent(String.self, forKey: .resultType)
         switch tag {
         case "complete", nil: self = try .complete(CallTool.Result(from: decoder))
+        case "task": self = try .task(HTTPTask(from: decoder))
         case "input_required": self = try .inputRequired(HTTPInputRequired(from: decoder))
         default: throw HTTPClientError.invalidResponse
         }

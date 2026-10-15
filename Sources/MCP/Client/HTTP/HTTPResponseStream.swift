@@ -87,14 +87,16 @@
 
         func request<Output: Decodable & Sendable>(
             method: String, id: ID, parameters: [String: Value], schema: Value? = nil,
-            formSupport: Bool,
+            formSupport: Bool, taskSupport: Bool = false,
             notification: @escaping @Sendable (Value) async throws -> Void
         ) async throws -> Output {
             var parameters = parameters
             var metadata = parameters["_meta"]?.objectValue ?? [:]
             metadata[HTTPProtocol.versionKey] = .string(HTTPProtocol.version)
             metadata[HTTPProtocol.clientInfoKey] = try HTTPProtocol.value(clientInfo)
-            metadata[HTTPProtocol.capabilitiesKey] = formSupport ? ["elicitation": ["form": [:]]] : [:]
+            var capabilities: [String: Value] = formSupport ? ["elicitation": ["form": [:]]] : [:]
+            if taskSupport { capabilities["extensions"] = [HTTPTask.extensionIdentifier: [:]] }
+            metadata[HTTPProtocol.capabilitiesKey] = .object(capabilities)
             parameters["_meta"] = .object(metadata)
             let body: Value = try [
                 "jsonrpc": "2.0",

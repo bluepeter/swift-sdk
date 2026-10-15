@@ -26,8 +26,14 @@ https://github.com/bluepeter/swift-sdk.
   be replayed. `recoverToolSubscription` rearms an exhausted cycle on foreground
   or tool use, coalescing with any active listen or retry. It does not reconnect
   a deliberately disconnected client or change the legacy transport.
-- Only form elicitation is advertised. URL elicitation, sampling, roots, Tasks,
-  and full modern server support are outside this extension. Reusing the
+- Form elicitation and the released 2026-07-28 Tasks extension are supported.
+  Tasks is advertised per tool call only when discovery declares it and the
+  caller supplies a task handler. The host owns persistence, polling, deadlines,
+  and recovery through `getTask`, `updateTask`, and `cancelTask`. A cancellation
+  acknowledgment does not confirm the final outcome. Lifecycle calls carry the
+  task ID in both parameters and `Mcp-Name`, and never replay the original tool.
+- URL elicitation, sampling, roots, legacy experimental Tasks, and full modern
+  server support are outside this extension. Reusing the
   existing form value types does not enable older elicitation callbacks. Those
   callbacks receive a method-not-found error explaining the supported input/retry
   flow, without advertising callback support. The public
@@ -43,7 +49,8 @@ https://github.com/bluepeter/swift-sdk.
 Sources: [2026 HTTP transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http),
 [MRTR](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr),
 [elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation),
-and [subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions).
+[subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions),
+and [Tasks](https://modelcontextprotocol.io/extensions/tasks/overview).
 
 ## Maintenance and checks
 
@@ -64,4 +71,8 @@ budget renewal, permanent refusal, initial listen failure, and cancellation
 during backoff. Cumbersome's `Tests/MCPBaseline` also exercises old Everything,
 a 2026 loopback wire fixture, and upstream 2026 Everything with actual socket
 drops and process restarts through the app's cached chat executor.
+Tasks checks cover opt-in capability negotiation, lifecycle routing, typed terminal
+results, required null TTL persistence, and input forms with the JSON Schema
+2020-12 dialect declaration. Cumbersome also verifies task completion and saved
+handle recovery with form input against the pinned upstream 2026 Everything.
 These checks do not establish universal conformance or third-party compatibility.
