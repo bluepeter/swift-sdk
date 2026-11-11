@@ -94,7 +94,7 @@
     }
 
     /// Uses a loopback socket so Foundation constructs and follows the redirect itself.
-    private struct RedirectTestServer {
+    struct RedirectTestServer {
         typealias Responder = @Sendable (HTTPRequestHead, Data) async throws -> HTTPClientFixture.Reply
         let channel: any Channel
         let endpoint: URL

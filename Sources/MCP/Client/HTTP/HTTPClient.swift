@@ -57,17 +57,32 @@
             await subscription?.resume()
         }
 
+        /// The authorizer must synchronize its state across concurrent requests and
+        /// coalesce token refreshes. Authentication does not serialize unrelated tools.
+        /// Authenticated connections use an owned session copied from the provided
+        /// configuration and reject automatic redirects to preserve resource binding.
         public func connect(
-            endpoint: URL, session: URLSession? = nil,
+            endpoint: URL, session configuredSession: URLSession? = nil,
+            authorizer: (any HTTPClientAuthorizer)? = nil,
             requestModifier: @escaping @Sendable (URLRequest) -> URLRequest = { $0 }
         ) async throws -> HTTPConnectionInfo {
             await disconnect()
             let attempt = generation
-            let session = session ?? makeSession()
+            let session: URLSession
+            if let authorizer {
+                try authorizer.validateEndpointSecurity(for: endpoint)
+                // Authenticated resource requests never follow redirects. Copying the
+                // configuration retains caller transport settings without delegating
+                // credential-forwarding decisions to a caller-owned session.
+                session = makeSession(configuration: configuredSession?.configuration ?? .ephemeral, authorized: true)
+            } else {
+                session = configuredSession ?? makeSession()
+            }
             let connection = ModernHTTPConnection(
                 endpoint: endpoint,
                 session: session,
                 clientInfo: info,
+                authorizer: authorizer,
                 requestModifier: requestModifier,
                 maximumMessageBytes: 16 * 1024 * 1024
             )
@@ -106,14 +121,33 @@
                     endpoint: endpoint,
                     session: session,
                     streaming: true,
-                    requestModifier: requestModifier
+                    authorizer: authorizer,
+                    requestModifier: { request in
+                        var modified = requestModifier(request)
+                        if authorizer != nil {
+                            // The public modifier customizes headers, not the resource
+                            // receiving an OAuth token. Preserve that binding on fallback.
+                            modified.url = request.url
+                            modified.setValue(
+                                request.value(forHTTPHeaderField: "Authorization"),
+                                forHTTPHeaderField: "Authorization"
+                            )
+                        }
+                        return modified
+                    }
                 )
                 return try await connectLegacy(transport: transport, attempt: attempt)
             }
         }
 
-        private func makeSession() -> URLSession {
-            let session = URLSession(configuration: .default)
+        private func makeSession(
+            configuration: URLSessionConfiguration = .default, authorized: Bool = false
+        ) -> URLSession {
+            let session = URLSession(
+                configuration: configuration,
+                delegate: authorized ? HTTPAuthorizationRedirectDelegate() : nil,
+                delegateQueue: nil
+            )
             ownedSession = session
             return session
         }

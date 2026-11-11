@@ -13,9 +13,12 @@
         let events: AsyncThrowingStream<Event, Error>
         let consumed: @Sendable (Int) -> Void
 
-        init(request: URLRequest, session: URLSession, maximumBufferedBytes: Int) {
+        init(request: URLRequest, session: URLSession, maximumBufferedBytes: Int, allowsRedirects: Bool = true) {
             let (events, continuation) = AsyncThrowingStream<Event, Error>.makeStream()
-            let delegate = Delegate(continuation: continuation, maximumBufferedBytes: maximumBufferedBytes)
+            let delegate = Delegate(
+                continuation: continuation, maximumBufferedBytes: maximumBufferedBytes,
+                allowsRedirects: allowsRedirects
+            )
             let task = session.dataTask(with: request)
             task.delegate = delegate
             continuation.onTermination = { @Sendable _ in task.cancel() }
@@ -24,18 +27,31 @@
             consumed = { delegate.consumed($0) }
         }
 
-        // Leave redirect handling to URLSession, matching the legacy HTTP transport.
+        // Preserve native redirect behavior only for connections without an OAuth authorizer.
         private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             let continuation: AsyncThrowingStream<Event, Error>.Continuation
             let maximumBufferedBytes: Int
+            let allowsRedirects: Bool
             // URLSession produces chunks independently of the async consumer. Bound that queue
             // as well as individual parsed messages; all byte accounting is protected by this lock.
             private let lock = NSLock()
             private var bufferedBytes = 0
 
-            init(continuation: AsyncThrowingStream<Event, Error>.Continuation, maximumBufferedBytes: Int) {
+            init(
+                continuation: AsyncThrowingStream<Event, Error>.Continuation,
+                maximumBufferedBytes: Int, allowsRedirects: Bool
+            ) {
                 self.continuation = continuation
                 self.maximumBufferedBytes = maximumBufferedBytes
+                self.allowsRedirects = allowsRedirects
+            }
+
+            func urlSession(
+                _: URLSession, task _: URLSessionTask,
+                willPerformHTTPRedirection _: HTTPURLResponse, newRequest request: URLRequest,
+                completionHandler: @escaping @Sendable (URLRequest?) -> Void
+            ) {
+                completionHandler(allowsRedirects ? request : nil)
             }
 
             func consumed(_ count: Int) {
@@ -81,6 +97,7 @@
         let endpoint: URL
         let session: URLSession
         let clientInfo: Client.Info
+        var authorizer: (any HTTPClientAuthorizer)? = nil
         let requestModifier: @Sendable (URLRequest) -> URLRequest
         /// Bounds an individual result/event, not the lifetime of a notification stream.
         let maximumMessageBytes: Int
@@ -115,8 +132,39 @@
             request.setValue(nil, forHTTPHeaderField: "Mcp-Session-Id")
             request.setValue(nil, forHTTPHeaderField: "Last-Event-ID")
             try HTTPRoutingHeaders.apply(method: method, parameters: parameters, schema: schema, to: &request)
+            var attempts = 0
+            while true {
+                try Task.checkCancellation()
+                if let authorizer {
+                    try authorizer.validateEndpointSecurity(for: endpoint)
+                    guard request.url == endpoint else { throw HTTPClientError.invalidResponse }
+                    try await authorizer.prepareAuthorization(for: endpoint, session: session)
+                    try Task.checkCancellation()
+                    request.setValue(authorizer.authorizationHeader(for: endpoint), forHTTPHeaderField: "Authorization")
+                }
+                do {
+                    return try await response(request: request, id: id, notification: notification)
+                } catch let challenge as HTTPAuthorizationChallenge {
+                    guard let authorizer, attempts < authorizer.maxAuthorizationAttempts else {
+                        throw challenge.responseError
+                    }
+                    attempts += 1
+                    let handled = try await authorizer.handleChallenge(
+                        statusCode: challenge.status, headers: challenge.headers,
+                        endpoint: endpoint, operationKey: method, session: session
+                    )
+                    guard handled else { throw challenge.responseError }
+                }
+            }
+        }
+
+        private func response<Output: Decodable & Sendable>(
+            request: URLRequest, id: ID,
+            notification: @escaping @Sendable (Value) async throws -> Void
+        ) async throws -> Output {
             let stream = HTTPResponseStream(
-                request: request, session: session, maximumBufferedBytes: maximumMessageBytes
+                request: request, session: session, maximumBufferedBytes: maximumMessageBytes,
+                allowsRedirects: authorizer == nil
             )
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
@@ -125,6 +173,9 @@
                 var iterator = stream.events.makeAsyncIterator()
                 guard case let .response(response) = try await iterator.next() else {
                     throw HTTPClientError.invalidResponse
+                }
+                if authorizer != nil, response.statusCode == 401 || response.statusCode == 403 {
+                    throw HTTPAuthorizationChallenge(response: response)
                 }
                 let bytes = HTTPResponseBytes(
                     iterator: iterator, maximumFrameBytes: maximumMessageBytes, consumed: stream.consumed
