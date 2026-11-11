@@ -11,20 +11,6 @@ extension HTTPClientTransport {
             throw MCPError.internalError("Transport not connected")
         }
 
-        if let authorizer {
-            do {
-                try authorizer.validateEndpointSecurity(for: endpoint)
-            } catch {
-                throw MCPError.internalError(
-                    "Authorization flow failed: \(error.localizedDescription)"
-                )
-            }
-        }
-
-        if let authorizer {
-            try? await authorizer.prepareAuthorization(for: endpoint, session: session)
-        }
-
         var attempts = 0
         let operationKey = jsonRPCOperationKey(from: data)
 
@@ -46,11 +32,7 @@ extension HTTPClientTransport {
                 request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
             }
 
-            if let authValue = authorizer?.authorizationHeader(for: endpoint) {
-                request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
-            }
-
-            request = requestModifier(request)
+            request = try await authorizedRequest(request)
 
             do {
                 #if os(Linux)
@@ -58,36 +40,60 @@ extension HTTPClientTransport {
                     try await processResponse(response: response, data: responseData)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
+                    defer { responseStream.task.cancel() }
                     try await processResponse(response: response, stream: responseStream)
                 #endif
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
-                guard let authorizer, attempts < authorizer.maxAuthorizationAttempts else {
-                    throw mapAuthenticationChallengeError(authError)
-                }
+                try await handleAuthorizationChallenge(authError, operationKey: operationKey, attempts: attempts)
                 attempts += 1
-
-                let handled: Bool
-                do {
-                    handled = try await authorizer.handleChallenge(
-                        statusCode: authError.statusCode,
-                        headers: authError.headers,
-                        endpoint: endpoint,
-                        operationKey: operationKey,
-                        session: session
-                    )
-                } catch {
-                    throw MCPError.internalError(
-                        "Authorization flow failed: \(error.localizedDescription)")
-                }
-
-                if handled {
-                    continue
-                }
-
-                throw mapAuthenticationChallengeError(authError)
             }
         }
+    }
+
+    /// Preparation failures are terminal for this request. An authorizer can
+    /// explicitly keep a usable token after a best-effort proactive refresh.
+    func authorizedRequest(_ request: URLRequest) async throws -> URLRequest {
+        try Task.checkCancellation()
+        if let authorizer {
+            do {
+                try authorizer.validateEndpointSecurity(for: endpoint)
+            } catch {
+                throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+            }
+            try await authorizer.prepareAuthorization(for: endpoint, session: session)
+        }
+        try Task.checkCancellation()
+        guard isConnected else { throw MCPError.internalError("Transport not connected") }
+        var request = request
+        if let authValue = authorizer?.authorizationHeader(for: endpoint) {
+            request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
+        }
+        return requestModifier(request)
+    }
+
+    func handleAuthorizationChallenge(
+        _ error: HTTPAuthenticationChallengeError, operationKey: String?, attempts: Int
+    ) async throws {
+        try Task.checkCancellation()
+        guard let authorizer, attempts < authorizer.maxAuthorizationAttempts else {
+            throw mapAuthenticationChallengeError(error)
+        }
+        let handled: Bool
+        do {
+            handled = try await authorizer.handleChallenge(
+                statusCode: error.statusCode, headers: error.headers,
+                endpoint: endpoint, operationKey: operationKey, session: session
+            )
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                throw error
+            }
+            throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+        }
+        try Task.checkCancellation()
+        guard handled else { throw mapAuthenticationChallengeError(error) }
     }
 
     #if os(Linux)
@@ -163,25 +169,21 @@ extension HTTPClientTransport {
         }
     #endif
 
+    func authorizationChallenge(for response: HTTPURLResponse) -> HTTPAuthenticationChallengeError? {
+        guard response.statusCode == 401 || response.statusCode == 403 else { return nil }
+        return HTTPAuthenticationChallengeError(
+            statusCode: response.statusCode, headers: responseHeaders(from: response)
+        )
+    }
+
     private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
+        if let challenge = authorizationChallenge(for: response) { throw challenge }
         switch response.statusCode {
         case 200..<300:
             return
 
         case 400:
             throw MCPError.internalError("Bad request")
-
-        case 401:
-            throw HTTPAuthenticationChallengeError(
-                statusCode: response.statusCode,
-                headers: responseHeaders(from: response)
-            )
-
-        case 403:
-            throw HTTPAuthenticationChallengeError(
-                statusCode: response.statusCode,
-                headers: responseHeaders(from: response)
-            )
 
         case 404:
             if sessionID != nil {

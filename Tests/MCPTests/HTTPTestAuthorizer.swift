@@ -11,11 +11,19 @@
         private var statuses: [Int] = []
         private var headers: [[String: String]] = []
         private var preparations = 0
+        private let challengeError: (any Error)?
+        private let prepare: @Sendable () async throws -> Void
 
-        init(token: String? = nil, maxAuthorizationAttempts: Int = 3, handlesChallenges: Bool = true) {
+        init(
+            token: String? = nil, maxAuthorizationAttempts: Int = 3, handlesChallenges: Bool = true,
+            challengeError: (any Error)? = nil,
+            prepare: @escaping @Sendable () async throws -> Void = {}
+        ) {
             storedToken = token
             self.maxAuthorizationAttempts = maxAuthorizationAttempts
             self.handlesChallenges = handlesChallenges
+            self.challengeError = challengeError
+            self.prepare = prepare
         }
 
         var token: String? {
@@ -40,6 +48,7 @@
 
         func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
             lock.withLock { preparations += 1 }
+            try await prepare()
         }
 
         func handleChallenge(
@@ -49,8 +58,9 @@
                 methods.append(operationKey)
                 statuses.append(statusCode)
                 self.headers.append(headers)
-                if handlesChallenges { storedToken = "accepted" }
+                if handlesChallenges, challengeError == nil { storedToken = "accepted" }
             }
+            if let challengeError { throw challengeError }
             return handlesChallenges
         }
     }

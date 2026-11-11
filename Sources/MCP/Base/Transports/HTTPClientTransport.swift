@@ -324,69 +324,60 @@ public actor HTTPClientTransport: Transport {
 
     #if !os(Linux)
         private func connectToEventStream() async throws {
-            guard isConnected else {
-                logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
-                return
-            }
-
-            if let authorizer {
+            var attempts = 0
+            while true {
+                guard isConnected else {
+                    logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
+                    return
+                }
+                logger.debug("🔌 Preparing SSE connection request")
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "GET"
+                request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
+                request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
+                if let protocolVersion {
+                    request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+                }
+                if let sessionID {
+                    request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
+                }
+                if let lastEventID {
+                    request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
+                    logger.info("→ Resuming SSE stream with Last-Event-ID", metadata: ["lastEventID": "\(lastEventID)"])
+                } else {
+                    logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
+                }
+                request = try await authorizedRequest(request)
                 do {
-                    try authorizer.validateEndpointSecurity(for: endpoint)
-                } catch {
-                    throw MCPError.internalError(
-                        "Authorization flow failed: \(error.localizedDescription)"
-                    )
+                    try await receiveEventStream(request)
+                    return
+                } catch let error as HTTPAuthenticationChallengeError {
+                    try await handleAuthorizationChallenge(error, operationKey: nil, attempts: attempts)
+                    attempts += 1
                 }
             }
+        }
 
-            if let authorizer {
-                try? await authorizer.prepareAuthorization(for: endpoint, session: session)
-            }
-
-            logger.debug("🔌 Preparing SSE connection request")
-
-            var request = URLRequest(url: endpoint)
-            request.httpMethod = "GET"
-            request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
-            request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
-
-            if let protocolVersion = protocolVersion {
-                request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
-            }
-
-            if let sessionID = sessionID {
-                request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
-            }
-
-            if let lastEventID = lastEventID {
-                request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
-                logger.info("→ Resuming SSE stream with Last-Event-ID", metadata: ["lastEventID": "\(lastEventID)"])
-            } else {
-                logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
-            }
-
-            if let authValue = authorizer?.authorizationHeader(for: endpoint) {
-                request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
-            }
-
-            request = requestModifier(request)
-
+        private func receiveEventStream(_ request: URLRequest) async throws {
             logger.debug("Starting SSE connection")
-
             let (stream, response) = try await session.bytes(for: request)
-            self.activeGETSessionTask = stream.task
-
+            activeGETSessionTask = stream.task
+            // A rejected response can keep its body open. Close every attempt,
+            // including authorization challenges, before starting its retry.
+            defer {
+                stream.task.cancel()
+                activeGETSessionTask = nil
+            }
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
-
+            if let challenge = authorizationChallenge(for: httpResponse) { throw challenge }
             guard httpResponse.statusCode == 200 else {
                 if httpResponse.statusCode == 405 {
-                    self.streamingTask?.cancel()
+                    streamingTask?.cancel()
                 }
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
-
             if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
                 let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
@@ -395,9 +386,7 @@ public actor HTTPClientTransport: Transport {
                 }
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
-
-            defer { self.activeGETSessionTask = nil }
-            try await self.processSSE(stream)
+            try await processSSE(stream)
         }
 
         @discardableResult
